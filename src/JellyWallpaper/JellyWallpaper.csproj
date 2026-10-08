@@ -1,0 +1,75 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+
+    <AssemblyName>JellyWallpaper</AssemblyName>
+    <RootNamespace>JellyWallpaper</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Resources\app.ico</ApplicationIcon>
+
+    <!-- 版本号：设置面板会显示 -->
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+
+    <!-- 只保留中/英资源，减小体积 -->
+    <SatelliteResourceLanguages>zh-Hans;en</SatelliteResourceLanguages>
+    <!-- 我们有意用 app.manifest 声明系统 DPI 感知以对齐桌面 Shell，忽略 WinForms 的相关提示 -->
+    <NoWarn>$(NoWarn);WFAC010</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 移除 UseWindowsForms 引入的 System.Windows.Forms / System.Drawing 隐式全局 using，
+         避免与 WPF 命名空间(Application/Color/Point/Brush 等)产生歧义。
+         需要 WinForms 的类在各自文件中用全限定名或别名显式引入。 -->
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
+
+  <!--
+    发布配置：单文件、自包含、内置 .NET 运行时与原生库。
+    目标 Win10 x64，双击即可运行，无需安装任何运行库。
+  -->
+  <PropertyGroup Condition="'$(Configuration)'=='Release'">
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>embedded</DebugType>
+    <PublishReadyToRun>false</PublishReadyToRun>
+  </PropertyGroup>
+
+  <!--
+    编译 HLSL 像素着色器 (Jelly.fx) -> PS 3.0 字节码 (Jelly.ps)，内嵌进程序集。
+    需要 Windows SDK 的 fxc.exe（GitHub Actions windows-latest 自带）。
+    可用 /p:FxcPath=... 手动指定 fxc.exe 路径。
+  -->
+  <Target Name="CompileJellyShader" BeforeTargets="BeforeBuild" Condition="'$(OS)'=='Windows_NT'">
+    <PropertyGroup>
+      <JellyFx>$(MSBuildProjectDirectory)\Shaders\Jelly.fx</JellyFx>
+      <JellyPs>$(IntermediateOutputPath)Jelly.ps</JellyPs>
+      <FxcPath Condition="'$(FxcPath)'=='' and Exists('$(WindowsSdkDir)bin\$(WindowsSDKVersion)x64\fxc.exe')">$(WindowsSdkDir)bin\$(WindowsSDKVersion)x64\fxc.exe</FxcPath>
+      <FxcPath Condition="'$(FxcPath)'=='' and Exists('C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\fxc.exe')">C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\fxc.exe</FxcPath>
+      <FxcPath Condition="'$(FxcPath)'=='' and Exists('C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\fxc.exe')">C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\fxc.exe</FxcPath>
+      <FxcPath Condition="'$(FxcPath)'=='' and Exists('C:\Program Files (x86)\Windows Kits\10\bin\10.0.22000.0\x64\fxc.exe')">C:\Program Files (x86)\Windows Kits\10\bin\10.0.22000.0\x64\fxc.exe</FxcPath>
+      <FxcPath Condition="'$(FxcPath)'=='' and Exists('C:\Program Files (x86)\Windows Kits\10\bin\10.0.20348.0\x64\fxc.exe')">C:\Program Files (x86)\Windows Kits\10\bin\10.0.20348.0\x64\fxc.exe</FxcPath>
+      <FxcPath Condition="'$(FxcPath)'=='' and Exists('C:\Program Files (x86)\Windows Kits\10\bin\10.0.19041.0\x64\fxc.exe')">C:\Program Files (x86)\Windows Kits\10\bin\10.0.19041.0\x64\fxc.exe</FxcPath>
+      <FxcPath Condition="'$(FxcPath)'==''">$(MSBuildProjectDirectory)\..\..\tools\fxc.exe</FxcPath>
+    </PropertyGroup>
+    <Error Condition="!Exists('$(FxcPath)')" Text="未找到 fxc.exe（Windows SDK 的 HLSL 编译器）。请安装 Windows 10 SDK，或用 /p:FxcPath=C:\path\to\fxc.exe 指定路径。" />
+    <Exec Command="&quot;$(FxcPath)&quot; /T ps_3_0 /E main /Fo &quot;$(JellyPs)&quot; &quot;$(JellyFx)&quot; /nologo" />
+    <ItemGroup>
+      <EmbeddedResource Include="$(JellyPs)" LogicalName="JellyWallpaper.Shaders.Jelly.ps" />
+    </ItemGroup>
+  </Target>
+
+</Project>
