@@ -66,7 +66,15 @@
       <FxcPath Condition="'$(FxcPath)'==''">$(MSBuildProjectDirectory)\..\..\tools\fxc.exe</FxcPath>
     </PropertyGroup>
     <Error Condition="!Exists('$(FxcPath)')" Text="未找到 fxc.exe（Windows SDK 的 HLSL 编译器）。请安装 Windows 10 SDK，或用 /p:FxcPath=C:\path\to\fxc.exe 指定路径。" />
+
+    <!-- 关键：确保输出目录已存在，否则 fxc 无法写 Jelly.ps（会导致 CS1566） -->
+    <MakeDir Directories="$(IntermediateOutputPath)" />
+
     <Exec Command="&quot;$(FxcPath)&quot; /T ps_3_0 /E main /Fo &quot;$(JellyPs)&quot; &quot;$(JellyFx)&quot; /nologo" />
+
+    <!-- 保险：若 fxc 未生成目标文件，明确报错，避免晦涩的 CS1566 -->
+    <Error Condition="!Exists('$(JellyPs)')" Text="着色器编译未生成 Jelly.ps，请检查 fxc 输出与 Jelly.fx 语法。" />
+
     <ItemGroup>
       <EmbeddedResource Include="$(JellyPs)" LogicalName="JellyWallpaper.Shaders.Jelly.ps" />
     </ItemGroup>
