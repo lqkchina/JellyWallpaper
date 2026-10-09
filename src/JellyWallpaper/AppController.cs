@@ -7,7 +7,8 @@ using JellyWallpaper.UI;
 namespace JellyWallpaper;
 
 /// <summary>
-/// 应用编排控制器：把渲染层、壁纸管理、鼠标钩子、快捷键、托盘、设置面板串起来。
+/// 应用编排控制器：把渲染层、系统壁纸加载、鼠标钩子、托盘、设置面板串起来。
+/// v1.1.0 起去掉了换壁纸功能（文件夹轮换 / 手动切换 / 全局快捷键），只保留果冻形变。
 /// </summary>
 internal sealed class AppController : IDisposable
 {
@@ -18,11 +19,9 @@ internal sealed class AppController : IDisposable
     private WallpaperLayerWindow? _layer;
     private WallpaperManager? _wallpaper;
     private MouseHook? _mouseHook;
-    private HotkeyManager? _hotkey;
     private TrayController? _tray;
     private SettingsWindow? _settingsWindow;
 
-    private string _loadedFolder = "\0"; // 哨兵，保证首帧重载
     private bool _disposed;
 
     public AppController()
@@ -36,7 +35,7 @@ internal sealed class AppController : IDisposable
     /// <summary>初始化并进入托盘后台运行。</summary>
     public void Start()
     {
-        // 1. 定位桌面壁纸层
+        // 1. 定位桌面壁纸层（WorkerW，位于图标层之下）
         IntPtr workerW = DesktopLayerLocator.Locate();
         if (workerW == IntPtr.Zero)
         {
@@ -49,10 +48,14 @@ internal sealed class AppController : IDisposable
         _layer.SetDisplayOptions(_settings.DisplayMode, ParseColor(_settings.FillColor));
         _layer.Show();
 
-        // 3. 壁纸管理（渲染层已就绪后才加载，确保能显示）
-        _wallpaper = new WallpaperManager(_logger, bmp => _layer.ShowWallpaper(bmp));
+        // 3. 加载系统当前壁纸作为果冻作用纹理（仅一次，不再轮换）
+        _wallpaper = new WallpaperManager(_logger);
         _wallpaper.SetRenderCap(_settings.RenderResolutionCap);
-        _wallpaper.SetRotationOrder(_settings.RotationOrder);
+        var bmp = _wallpaper.LoadSystemWallpaper();
+        if (bmp != null)
+            _layer.ShowWallpaper(bmp);
+        else
+            _logger.Warn("未读取到系统壁纸，渲染层仅显示背景填充色（果冻形变无可见纹理）。");
 
         // 4. 鼠标钩子（只观察，不拦截）
         _mouseHook = new MouseHook();
@@ -63,28 +66,11 @@ internal sealed class AppController : IDisposable
             _logger.Warn("安装全局鼠标钩子失败，果冻形变将不可用。");
         }
 
-        // 5. 全局快捷键
-        _hotkey = new HotkeyManager(_logger);
-        if (_layer != null)
-        {
-            var hwnd = new System.Windows.Interop.WindowInteropHelper(_layer).Handle;
-            if (hwnd != IntPtr.Zero)
-            {
-                _hotkey.Bind(hwnd);
-                _hotkey.Update(_settings.HotkeyModifiers, _settings.HotkeyKey);
-                _hotkey.HotkeyPressed += () => _wallpaper?.Next(true);
-            }
-        }
-
-        // 6. 托盘
+        // 5. 托盘
         _tray = new TrayController(GetVersion());
         _tray.OpenSettings += OpenSettingsWindow;
-        _tray.SwitchWallpaper += () => _wallpaper?.Next(true);
         _tray.RestartApp += Restart;
         _tray.ExitApp += Exit;
-
-        // 7. 应用当前设置（含壁纸加载与自动轮换）
-        ApplySettings(_settings, save: false);
 
         _logger.Info("启动完成，已最小化到系统托盘后台运行。");
     }
@@ -103,7 +89,6 @@ internal sealed class AppController : IDisposable
         {
             _settingsWindow = new SettingsWindow(_logger);
             _settingsWindow.SettingsChanged += s => ApplySettings(s, save: true);
-            _settingsWindow.SwitchNowRequested += () => _wallpaper?.Next(true);
             // 展示历史日志
             foreach (var line in _logger.Snapshot()) _settingsWindow.AppendLog(line);
             _logger.RecentChanged += line => _settingsWindow.AppendLog(line);
@@ -115,25 +100,12 @@ internal sealed class AppController : IDisposable
     /// <summary>把设置应用到各个组件（实时预览），并保存。</summary>
     private void ApplySettings(AppSettings s, bool save)
     {
-        // 形变参数
+        // 壁纸显示与果冻形变参数（实时预览）
         _layer?.ApplyEffectParams(s.DeformationStrength, s.ReboundSpeed, s.PressDamping);
         _layer?.SetDisplayOptions(s.DisplayMode, ParseColor(s.FillColor));
 
-        // 渲染分辨率 / 文件夹变化时重载壁纸
-        if (_wallpaper != null)
-        {
-            _wallpaper.SetRenderCap(s.RenderResolutionCap);
-            if (!string.Equals(_loadedFolder, s.WallpaperFolder, StringComparison.OrdinalIgnoreCase))
-            {
-                _loadedFolder = s.WallpaperFolder;
-                _wallpaper.Reload(s.WallpaperFolder);
-            }
-            _wallpaper.SetRotationOrder(s.RotationOrder);
-            _wallpaper.StartRotation(s.RotationIntervalSeconds);
-        }
-
-        // 全局快捷键
-        _hotkey?.Update(s.HotkeyModifiers, s.HotkeyKey);
+        // 渲染分辨率
+        _wallpaper?.SetRenderCap(s.RenderResolutionCap);
 
         // 开机自启
         if (AutoStart.IsEnabled() != s.AutoStart)
@@ -170,7 +142,7 @@ internal sealed class AppController : IDisposable
         Application.Current.Shutdown();
     }
 
-    /// <summary>退出：立即恢复原始桌面壁纸（移除渲染层后系统原生壁纸自动还原）。</summary>
+    /// <summary>退出：移除渲染层后系统原生壁纸自动还原，不留残留。</summary>
     private void Exit()
     {
         _logger.Info("退出程序，恢复原始桌面壁纸。");
@@ -185,9 +157,8 @@ internal sealed class AppController : IDisposable
 
         try { _settingsWindow?.Close(); } catch { }
         try { _tray?.Dispose(); } catch { }
-        try { _hotkey?.Dispose(); } catch { }
         try { _mouseHook?.Dispose(); } catch { }
-        try { _wallpaper?.Dispose(); } catch { }
+        try { _wallpaper = null; } catch { }
         try { _layer?.Close(); } catch { }
         try { _store.Save(_settings); } catch { }
         try { _logger.Dispose(); } catch { }

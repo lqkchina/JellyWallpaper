@@ -11,22 +11,14 @@ public enum WallpaperDisplayMode
     Center = 5,  // 居中：原图居中，其余填背景色
 }
 
-/// <summary>壁纸轮换顺序。</summary>
-public enum RotationOrder
-{
-    Sequential = 0, // 顺序
-    Random = 1,     // 随机
-}
-
 /// <summary>
 /// 应用设置模型。通过 System.Text.Json 序列化保存到设置文件。
+/// v1.1.0 起去掉了换壁纸相关功能（文件夹/轮换/快捷键），只保留壁纸显示与果冻形变，
+/// 壁纸来源为 Windows 系统当前壁纸。
 /// </summary>
 public sealed class AppSettings
 {
-    // ---- 壁纸 ----
-    public string WallpaperFolder { get; set; } = string.Empty;
-    public int RotationIntervalSeconds { get; set; } = 300; // 0 = 关闭自动轮换
-    public RotationOrder RotationOrder { get; set; } = RotationOrder.Sequential;
+    // ---- 壁纸显示 ----
     public WallpaperDisplayMode DisplayMode { get; set; } = WallpaperDisplayMode.Fill;
     public string FillColor { get; set; } = "#000000";
 
@@ -35,10 +27,6 @@ public sealed class AppSettings
     public double ReboundSpeed { get; set; } = 70.0;       // 回弹速度（弹簧刚度）
     public double PressDamping { get; set; } = 12.0;       // 按压衰减系数（阻尼）
     public int RenderResolutionCap { get; set; } = 0;      // 形变渲染分辨率上限（0=原图, 1280/1920/2560）
-
-    // ---- 全局快捷键（手动随机换壁纸）----
-    public uint HotkeyModifiers { get; set; } = NativeMethods.MOD_CONTROL | NativeMethods.MOD_ALT;
-    public uint HotkeyKey { get; set; } = 0x57; // 'W'
 
     // ---- 其它 ----
     public bool AutoStart { get; set; }

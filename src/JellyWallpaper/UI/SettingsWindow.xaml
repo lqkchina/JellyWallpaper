@@ -1,7 +1,7 @@
 <Window x:Class="JellyWallpaper.UI.SettingsWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="JellyWallpaper 设置" Width="520" Height="720"
+        Title="JellyWallpaper 设置" Width="520" Height="660"
         WindowStartupLocation="CenterScreen"
         ResizeMode="CanMinimize" ShowInTaskbar="False"
         Background="#F3F4F6" FontFamily="Microsoft YaHei UI" FontSize="13">
@@ -25,9 +25,8 @@
     <Grid Margin="16">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>  <!-- 标题 -->
-            <RowDefinition Height="Auto"/>  <!-- 壁纸 -->
+            <RowDefinition Height="Auto"/>  <!-- 壁纸显示 -->
             <RowDefinition Height="Auto"/>  <!-- 果冻形变 -->
-            <RowDefinition Height="Auto"/>  <!-- 快捷键 -->
             <RowDefinition Height="Auto"/>  <!-- 其它 -->
             <RowDefinition Height="*"/>     <!-- 日志 -->
             <RowDefinition Height="Auto"/>  <!-- 底部按钮 -->
@@ -39,25 +38,11 @@
             <TextBlock x:Name="VersionText" Foreground="#6B7280" Margin="0,2,0,0"/>
         </StackPanel>
 
-        <!-- 壁纸设置 -->
+        <!-- 壁纸显示 -->
         <StackPanel Grid.Row="1">
-            <TextBlock Style="{StaticResource SecTitle}" Text="壁纸"/>
+            <TextBlock Style="{StaticResource SecTitle}" Text="壁纸显示"/>
+            <TextBlock Text="壁纸来源：Windows 系统当前壁纸" Foreground="#6B7280" Margin="0,0,0,4"/>
             <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="110"/>
-                    <ColumnDefinition Width="*"/>
-                </Grid.ColumnDefinitions>
-                <TextBlock Style="{StaticResource RowLbl}" Text="图片文件夹"/>
-                <Grid Grid.Column="1">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                    </Grid.ColumnDefinitions>
-                    <TextBox x:Name="FolderBox" Grid.Column="0" VerticalContentAlignment="Center"/>
-                    <Button x:Name="BrowseBtn" Grid.Column="1" Content="浏览…" Margin="6,0,0,0" Padding="10,3"/>
-                </Grid>
-            </Grid>
-            <Grid Margin="0,6,0,0">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="110"/>
                     <ColumnDefinition Width="*"/>
@@ -80,20 +65,6 @@
                     <Button x:Name="PickColorBtn" Grid.Column="1" Content="取色…" Margin="6,0,0,0" Padding="10,3"/>
                 </Grid>
             </Grid>
-            <Grid Margin="0,6,0,0">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="110"/>
-                    <ColumnDefinition Width="90"/>
-                    <ColumnDefinition Width="8"/>
-                    <ColumnDefinition Width="110"/>
-                    <ColumnDefinition Width="*"/>
-                </Grid.ColumnDefinitions>
-                <TextBlock Style="{StaticResource RowLbl}" Text="轮换间隔(秒)"/>
-                <TextBox x:Name="IntervalBox" Grid.Column="1" VerticalContentAlignment="Center"/>
-                <TextBlock Grid.Column="3" Style="{StaticResource RowLbl}" Text="轮换顺序"/>
-                <ComboBox x:Name="OrderBox" Grid.Column="4" VerticalContentAlignment="Center"/>
-            </Grid>
-            <Button x:Name="SwitchNowBtn" Content="立即随机切换壁纸" Margin="0,8,0,0" Padding="10,4" HorizontalAlignment="Left"/>
         </StackPanel>
 
         <!-- 果冻形变参数 -->
@@ -139,44 +110,14 @@
             </Grid>
         </StackPanel>
 
-        <!-- 全局快捷键 -->
-        <StackPanel Grid.Row="3">
-            <TextBlock Style="{StaticResource SecTitle}" Text="全局快捷键（手动随机换壁纸）"/>
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="110"/>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
-                <TextBlock Style="{StaticResource RowLbl}" Text="组合键"/>
-                <CheckBox x:Name="ModCtrl"  Grid.Column="1" Content="Ctrl" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                <CheckBox x:Name="ModAlt"   Grid.Column="2" Content="Alt" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                <CheckBox x:Name="ModShift" Grid.Column="3" Content="Shift" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                <CheckBox x:Name="ModWin"   Grid.Column="4" Content="Win" VerticalAlignment="Center"/>
-            </Grid>
-            <Grid Margin="0,8,0,0">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="110"/>
-                    <ColumnDefinition Width="*"/>
-                </Grid.ColumnDefinitions>
-                <TextBlock Style="{StaticResource RowLbl}" Text="触发按键"/>
-                <TextBox x:Name="HotkeyKeyBox" Grid.Column="1" IsReadOnly="True"
-                         ToolTip="点击后按下新按键，松手即记录"
-                         Foreground="#374151" Background="White"/>
-            </Grid>
-            <TextBlock x:Name="HotkeyStatus" Foreground="#B45309" Margin="110,4,0,0"/>
-        </StackPanel>
-
         <!-- 其它 -->
-        <StackPanel Grid.Row="4">
+        <StackPanel Grid.Row="3">
             <TextBlock Style="{StaticResource SecTitle}" Text="其它"/>
             <CheckBox x:Name="AutoStartBox" Content="开机自动启动（进入系统托盘）" VerticalAlignment="Center"/>
         </StackPanel>
 
         <!-- 日志 -->
-        <StackPanel Grid.Row="5" Margin="0,10,0,0">
+        <StackPanel Grid.Row="4" Margin="0,10,0,0">
             <TextBlock Style="{StaticResource SecTitle}" Text="运行日志" Margin="0,0,0,4"/>
             <TextBox x:Name="LogBox" IsReadOnly="True" TextWrapping="Wrap"
                      VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
@@ -184,7 +125,7 @@
         </StackPanel>
 
         <!-- 底部按钮 -->
-        <StackPanel Grid.Row="6" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+        <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
             <Button x:Name="RestoreBtn" Content="恢复默认" Padding="14,5" Margin="0,0,8,0"/>
             <Button x:Name="CloseBtn" Content="关闭（后台继续运行）" Padding="14,5" IsDefault="True"/>
         </StackPanel>

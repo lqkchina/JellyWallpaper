@@ -1,178 +1,108 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
-using System.Linq;
-using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
-using System.Windows.Threading;
+using Microsoft.Win32;
 
 namespace JellyWallpaper.Core;
 
 /// <summary>
-/// 壁纸管理器：扫描文件夹图片、按顺序/随机轮换、解码限长（形变渲染分辨率）、
-/// 切换时交给渲染层做丝滑淡入淡出。
+/// 壁纸管理器（v1.1.0 起不再扫描文件夹/轮换/切换）。
+/// 职责：读取 Windows 系统当前壁纸，作为果冻形变的作用纹理。
+/// 获取顺序：① 系统实际显示的 TranscodedWallpaper → ② 注册表 WallPaper 路径。
 /// </summary>
-internal sealed class WallpaperManager : IDisposable
+internal sealed class WallpaperManager
 {
-    // 支持格式：jpg/jpeg/png/bmp/gif/tiff，webp 依赖系统 WIC 编解码器（Win10 22H2+ 或安装 WebP 扩展）
-    private static readonly string[] SupportedExt =
-        { ".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff", ".webp" };
-
     private readonly Logger _logger;
-    private readonly Action<BitmapSource> _showWallpaper;
-    private DispatcherTimer? _rotateTimer;
-    private readonly Random _rng = new();
-    private List<string> _files = new();
-    private int _index = -1;
+    private int _renderCap; // 形变渲染分辨率上限（0=原图）
 
-    public event Action<string>? WallpaperChanged;
-
-    public WallpaperManager(Logger logger, Action<BitmapSource> showWallpaper)
+    public WallpaperManager(Logger logger)
     {
         _logger = logger;
-        _showWallpaper = showWallpaper;
     }
 
-    /// <summary>刷新文件夹文件列表，并立即显示一张（保持当前索引尽量不变）。</summary>
-    public void Reload(string folder)
-    {
-        var files = ScanFolder(folder);
-        _files = files;
+    /// <summary>设置形变渲染分辨率上限（0=原图）。</summary>
+    public void SetRenderCap(int cap) => _renderCap = cap;
 
-        if (files.Count == 0)
+    /// <summary>
+    /// 加载系统当前壁纸。找不到有效壁纸时返回 null（渲染层仅显示背景填充色）。
+    /// </summary>
+    public BitmapSource? LoadSystemWallpaper()
+    {
+        string? path = FindWallpaperPath();
+        if (string.IsNullOrEmpty(path) || !File.Exists(path))
         {
-            _logger.Warn(folder.Length == 0
-                ? "壁纸文件夹为空，未加载任何壁纸。"
-                : $"文件夹中未找到支持的图片: {folder}");
-            return;
+            _logger.Warn("未找到有效的系统壁纸文件（桌面可能为纯色，或系统壁纸缓存不可读）。");
+            return null;
         }
 
-        _logger.Info($"已加载 {files.Count} 张壁纸: {folder}");
-        Show(0);
-    }
-
-    private List<string> ScanFolder(string folder)
-    {
-        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
-        {
-            return new List<string>();
-        }
         try
         {
-            return Directory.EnumerateFiles(folder)
-                .Where(f => SupportedExt.Contains(Path.GetExtension(f).ToLowerInvariant()))
-                .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
-                .ToList();
-        }
-        catch (Exception ex)
-        {
-            _logger.Error("扫描壁纸文件夹失败: " + ex.Message, ex);
-            return new List<string>();
-        }
-    }
-
-    /// <summary>启动自动轮换定时器（间隔由设置决定）。</summary>
-    public void StartRotation(int intervalSeconds)
-    {
-        StopRotation();
-        if (intervalSeconds <= 0) return;
-        _rotateTimer = new DispatcherTimer
-        {
-            Interval = TimeSpan.FromSeconds(intervalSeconds)
-        };
-        _rotateTimer.Tick += (_, _) => Next(useRandom: _settingsRandom);
-        _rotateTimer.Start();
-        _logger.Info($"自动轮换已启动，间隔 {intervalSeconds} 秒。");
-    }
-
-    private bool _settingsRandom;
-
-    public void SetRotationOrder(RotationOrder order)
-    {
-        _settingsRandom = order == RotationOrder.Random;
-    }
-
-    public void StopRotation()
-    {
-        _rotateTimer?.Stop();
-        _rotateTimer = null;
-    }
-
-    /// <summary>切换到下一张（顺序或随机）。</summary>
-    public void Next(bool useRandom)
-    {
-        if (_files.Count == 0) return;
-        int next = useRandom ? _rng.Next(_files.Count) : (_index + 1) % _files.Count;
-        Show(next);
-    }
-
-    private void Show(int index)
-    {
-        if (_files.Count == 0) return;
-        if (index < 0 || index >= _files.Count) index = 0;
-        _index = index;
-
-        string file = _files[index];
-        try
-        {
-            BitmapSource? bmp = LoadDecoded(file, _renderCap);
+            var bmp = LoadBitmap(path, _renderCap);
             if (bmp == null)
             {
-                _logger.Warn($"无法解码壁纸，已跳过: {file}");
-                return;
+                _logger.Warn($"系统壁纸无法解码，已跳过: {path}");
+                return null;
             }
-            _showWallpaper(bmp);
-            WallpaperChanged?.Invoke(file);
+            _logger.Info($"已加载系统壁纸: {path} ({bmp.PixelWidth}x{bmp.PixelHeight})");
+            return bmp;
         }
         catch (Exception ex)
         {
-            _logger.Error($"加载壁纸失败: {file} -> " + ex.Message, ex);
-        }
-    }
-
-    private int _renderCap;
-
-    /// <summary>设置形变渲染分辨率上限（长边像素，0=原图）。</summary>
-    public void SetRenderCap(int cap) => _renderCap = Math.Max(0, cap);
-
-    private static BitmapSource? LoadDecoded(string file, int cap)
-    {
-        try
-        {
-            var bi = new BitmapImage();
-            bi.BeginInit();
-            bi.CacheOption = BitmapCacheOption.OnLoad; // 解码后即释放文件句柄
-            bi.CreateOptions = BitmapCreateOptions.PreservePixelFormat;
-            bi.UriSource = new Uri(file, UriKind.Absolute);
-            if (cap > 0)
-            {
-                // 限制解码长边，降低显存/内存占用（形变渲染分辨率）
-                using var img = System.Drawing.Image.FromFile(file);
-                int w = img.Width, h = img.Height;
-                int max = Math.Max(w, h);
-                if (max > cap)
-                {
-                    double k = (double)cap / max;
-                    bi.DecodePixelWidth = Math.Max(1, (int)(w * k));
-                    bi.DecodePixelHeight = Math.Max(1, (int)(h * k));
-                }
-            }
-            bi.EndInit();
-            bi.Freeze();
-            return bi;
-        }
-        catch
-        {
-            // 解码失败（含 webp 缺少编解码器）
+            _logger.Error("加载系统壁纸失败: " + ex.Message, ex);
             return null;
         }
     }
 
-    public int Count => _files.Count;
-
-    public void Dispose()
+    /// <summary>定位系统壁纸文件路径。</summary>
+    private static string? FindWallpaperPath()
     {
-        StopRotation();
+        // ① TranscodedWallpaper：Windows 实际显示的壁纸（含多显示器拼接/幻灯片），最可靠
+        string themes = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "Microsoft", "Windows", "Themes");
+        string transcoded = Path.Combine(themes, "TranscodedWallpaper");
+        if (File.Exists(transcoded))
+            return transcoded;
+
+        // ② 注册表单张壁纸路径
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(@"Control Panel\Desktop");
+            string? wp = key?.GetValue("WallPaper") as string;
+            if (!string.IsNullOrEmpty(wp) && File.Exists(wp))
+                return wp;
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine("读取壁纸注册表失败: " + ex.Message);
+        }
+
+        return null;
+    }
+
+    /// <summary>按形变渲染分辨率上限解码图片。cap&gt;0 时缩放到长边不超过 cap。</summary>
+    private BitmapSource? LoadBitmap(string path, int cap)
+    {
+        var bi = new BitmapImage();
+        bi.BeginInit();
+        bi.CacheOption = BitmapCacheOption.OnLoad;
+        bi.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
+        bi.UriSource = new Uri(path);
+        bi.EndInit();
+        bi.Freeze();
+
+        if (cap <= 0)
+            return bi;
+        if (Math.Max(bi.PixelWidth, bi.PixelHeight) <= cap)
+            return bi;
+
+        // 等比缩放到长边 = cap，降低形变着色器采样开销
+        double scale = (double)cap / Math.Max(bi.PixelWidth, bi.PixelHeight);
+        int w = (int)Math.Round(bi.PixelWidth * scale);
+        int h = (int)Math.Round(bi.PixelHeight * scale);
+        var resized = new TransformedBitmap(bi, new ScaleTransform(w / (double)bi.PixelWidth, h / (double)bi.PixelHeight));
+        resized.Freeze();
+        return resized;
     }
 }

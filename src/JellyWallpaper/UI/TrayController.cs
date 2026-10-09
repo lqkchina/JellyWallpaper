@@ -6,7 +6,7 @@ namespace JellyWallpaper.UI;
 
 /// <summary>
 /// 系统托盘控制器：应用默认最小化到托盘运行。
-/// 菜单：打开设置面板 / 手动切换壁纸 / 重启程序 / 退出程序。
+/// 菜单：打开设置面板 / 重启程序 / 退出程序。
 /// 托盘图标运行时用 GDI 绘制，避免额外图片资源。
 /// </summary>
 internal sealed class TrayController : IDisposable
@@ -17,8 +17,6 @@ internal sealed class TrayController : IDisposable
 
     /// <summary>点击"打开设置面板"。</summary>
     public event Action? OpenSettings;
-    /// <summary>点击"手动切换壁纸"。</summary>
-    public event Action? SwitchWallpaper;
     /// <summary>点击"重启程序"。</summary>
     public event Action? RestartApp;
     /// <summary>点击"退出程序"。</summary>
@@ -35,7 +33,6 @@ internal sealed class TrayController : IDisposable
 
         _menu = new ContextMenuStrip();
         _menu.Items.Add("打开设置面板", null, (_, _) => OpenSettings?.Invoke());
-        _menu.Items.Add("手动切换壁纸", null, (_, _) => SwitchWallpaper?.Invoke());
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add("重启程序", null, (_, _) => RestartApp?.Invoke());
         _menu.Items.Add("退出程序", null, (_, _) => ExitApp?.Invoke());

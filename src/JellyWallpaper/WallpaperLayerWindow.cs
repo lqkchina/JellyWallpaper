@@ -40,8 +40,12 @@ internal sealed class WallpaperLayerWindow : Window
 
         Title = "JellyWallpaper";
         WindowStyle = WindowStyle.None;
-        AllowsTransparency = true;
-        Background = Brushes.Transparent;
+        // 关键：不使用 AllowsTransparency（透明窗口）。
+        // WPF 的 AllowsTransparency 使用 WS_EX_LAYERED，而 layered 窗口被 SetParent
+        // 变成桌面子窗口后，在 Win10 上常出现"内容不渲染/显示空白"，导致壁纸层看不到。
+        // 我们的渲染层要完全盖住原生壁纸，本来就不需要真透明——
+        // 适应/居中模式留出的空白区由背景填充色填补。改不透明窗口可保证子窗口正常渲染。
+        Background = new SolidColorBrush(Colors.Black); // 兜底，实际由 _grid 背景覆盖
         ShowInTaskbar = false;
         ShowActivated = false;
         ResizeMode = ResizeMode.NoResize;
@@ -63,12 +67,22 @@ internal sealed class WallpaperLayerWindow : Window
     {
         try
         {
+            if (workerW == IntPtr.Zero)
+            {
+                _logger.Error("挂载失败：桌面壁纸层 WorkerW 句柄为空（未定位到）。");
+            }
+
             var helper = new WindowInteropHelper(this);
             IntPtr hwnd = helper.Handle;
-            if (hwnd == IntPtr.Zero) return;
+            if (hwnd == IntPtr.Zero)
+            {
+                _logger.Error("挂载失败：窗口句柄为空。");
+                return;
+            }
 
             // 父窗口改为壁纸 WorkerW（图标层之下）
-            NativeMethods.SetParent(hwnd, workerW);
+            IntPtr oldParent = NativeMethods.SetParent(hwnd, workerW);
+            _logger.Info($"SetParent: hwnd={hwnd.ToInt64():X}, parent={workerW.ToInt64():X}, oldParent={oldParent.ToInt64():X}");
 
             // 转为真正的子窗口样式（移除 WS_POPUP、加上 WS_CHILD），否则渲染可能异常
             int style = NativeMethods.GetWindowLongPtr(hwnd, NativeMethods.GWL_STYLE).ToInt32();
@@ -91,11 +105,11 @@ internal sealed class WallpaperLayerWindow : Window
             int x = screenLeft - parentRect.Left;
             int y = screenTop - parentRect.Top;
 
-            NativeMethods.SetWindowPos(hwnd, IntPtr.Zero, x, y, screenW, screenH,
+            bool ok = NativeMethods.SetWindowPos(hwnd, IntPtr.Zero, x, y, screenW, screenH,
                 NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE
                 | NativeMethods.SWP_SHOWWINDOW | NativeMethods.SWP_FRAMECHANGED);
 
-            _logger.Info($"壁纸渲染层已挂载到桌面 WorkerW, 虚拟屏幕 {screenW}x{screenH} @ ({x},{y})");
+            _logger.Info($"壁纸渲染层已挂载, SetWindowPos={ok}, 虚拟屏幕 {screenW}x{screenH} @ ({x},{y}), 父窗口={workerW.ToInt64():X}");
         }
         catch (Exception ex)
         {
@@ -226,6 +240,7 @@ internal sealed class WallpaperLayerWindow : Window
     {
         _mode = mode;
         _grid.Background = new SolidColorBrush(fillColor);
+        Background = new SolidColorBrush(fillColor); // 同步窗口背景（不透明渲染层）
 
         // 若已有当前壁纸，重建显示元素以应用新模式
         if (_current != null)
