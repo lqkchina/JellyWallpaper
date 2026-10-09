@@ -14,9 +14,14 @@ namespace JellyWallpaper;
 /// 核心职责：
 ///   1. 作为桌面"壁纸 WorkerW"的子窗口，覆盖原生壁纸、位于图标层之下 —— 只渲染壁纸+果冻形变，
 ///      绝不遮挡/拦截桌面图标（图标选中、拖拽、新建、删除均不受影响）。
-///   2. 用 CPU 果冻形变渲染器（CpuJellyRenderer）实现"按压向内凹陷 + 回弹"。
-///      不依赖 GPU / ShaderEffect，兼容虚拟机、远程桌面等无硬件加速环境（避免壁纸层全黑）。
+///   2. 用 CPU 果冻形变渲染器（CpuJellyRenderer）实现"按压向内凹陷 + 回弹"，
+///      不依赖 GPU / ShaderEffect，兼容虚拟机、远程桌面等无硬件加速环境。
 ///   3. 负责壁纸按显示模式布局（填充/适应/拉伸/平铺/跨区/居中）。
+///
+/// 时序关键点（曾导致"壁纸不显示"）：
+///   Window.Show() 是异步的 —— 返回时窗口尚未加载、尚未挂载到桌面。因此本类**不在** ShowWallpaper
+///   时立即生成画面，而是等 Loaded 事件（挂载完成、尺寸确定）后再统一 RebuildBaseImage，
+///   确保壁纸一定在窗口就绪后生成。
 /// </summary>
 internal sealed class WallpaperLayerWindow : Window
 {
@@ -27,6 +32,7 @@ internal sealed class WallpaperLayerWindow : Window
     private readonly Grid _grid;
     private readonly Image _view;
     private bool _renderingAttached;
+    private bool _reportedNoFrame;   // 已提示"无画面"（避免刷屏）
     private Point _pressNormalized;
 
     private WallpaperDisplayMode _mode = WallpaperDisplayMode.Fill;
@@ -68,7 +74,12 @@ internal sealed class WallpaperLayerWindow : Window
         _grid.Children.Add(_view);
         Content = _grid;
 
-        Loaded += (_, _) => HostIntoDesktop(parentWorkerW);
+        // 关键：挂载完成后再生成画面
+        Loaded += (_, _) =>
+        {
+            HostIntoDesktop(parentWorkerW);
+            RebuildBaseImage();
+        };
     }
 
     /// <summary>窗口加载后，挂到桌面壁纸层 WorkerW 之下并铺满虚拟屏幕。</summary>
@@ -95,7 +106,7 @@ internal sealed class WallpaperLayerWindow : Window
 
             // 转为真正的子窗口样式（移除 WS_POPUP、加上 WS_CHILD），否则渲染可能异常
             int style = NativeMethods.GetWindowLongPtr(hwnd, NativeMethods.GWL_STYLE).ToInt32();
-            style = (style & ~NativeMethods.WS_POPUP) | NativeMethods.WS_CHILD;
+            style = (style & ~NativeMethods.WS_POPUP) | NativeMethods.WS_CHILD | NativeMethods.WS_VISIBLE;
             NativeMethods.SetWindowLongPtr(hwnd, NativeMethods.GWL_STYLE, new IntPtr(style));
 
             // 禁止激活、禁止命中（更保险），避免干扰桌面
@@ -114,11 +125,15 @@ internal sealed class WallpaperLayerWindow : Window
             int x = screenLeft - parentRect.Left;
             int y = screenTop - parentRect.Top;
 
-            bool ok = NativeMethods.SetWindowPos(hwnd, IntPtr.Zero, x, y, screenW, screenH,
+            NativeMethods.SetWindowPos(hwnd, IntPtr.Zero, x, y, screenW, screenH,
                 NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE
                 | NativeMethods.SWP_SHOWWINDOW | NativeMethods.SWP_FRAMECHANGED);
 
-            _logger.Info($"壁纸渲染层已挂载, SetWindowPos={ok}, 虚拟屏幕 {screenW}x{screenH} @ ({x},{y}), 父窗口={workerW.ToInt64():X}");
+            // 挂载后校验：可见性 + 客户区实际尺寸（像素），用于诊断是否真正铺满/可见
+            bool visible = NativeMethods.IsWindowVisible(hwnd);
+            NativeMethods.GetClientRect(hwnd, out var client);
+            _logger.Info($"挂载完成: 可见={visible}, 客户区={client.Right}x{client.Bottom}px, " +
+                         $"目标={screenW}x{screenH} @ ({x},{y}), 父窗口={workerW.ToInt64():X}");
         }
         catch (Exception ex)
         {
@@ -138,6 +153,12 @@ internal sealed class WallpaperLayerWindow : Window
         nx = Math.Clamp(nx, 0.0, 1.0);
         ny = Math.Clamp(ny, 0.0, 1.0);
         _pressNormalized = new Point(nx, ny);
+
+        if (_renderer.Output == null && !_reportedNoFrame)
+        {
+            _reportedNoFrame = true;
+            _logger.Warn("点击了桌面，但壁纸画面尚未生成（无输出位图）。请检查壁纸加载日志。");
+        }
 
         _animator.Press();
         AttachRenderLoop();
@@ -195,11 +216,15 @@ internal sealed class WallpaperLayerWindow : Window
 
     // ================= 壁纸显示 =================
 
-    /// <summary>设置壁纸（系统壁纸），并按当前显示模式重建画面。</summary>
+    /// <summary>设置壁纸（系统壁纸）。仅保存源，实际在挂载完成后生成画面。</summary>
     public void ShowWallpaper(BitmapSource bmp)
     {
         _wallpaperSource = bmp;
-        RebuildBaseImage();
+        if (IsLoaded)
+        {
+            RebuildBaseImage();
+        }
+        // 若窗口尚未加载，则等 Loaded 事件里统一 RebuildBaseImage
     }
 
     /// <summary>设置壁纸显示模式与背景填充色。</summary>
@@ -210,8 +235,8 @@ internal sealed class WallpaperLayerWindow : Window
         _grid.Background = new SolidColorBrush(fillColor);
         Background = new SolidColorBrush(fillColor); // 同步窗口背景（不透明渲染层）
 
-        // 若已有壁纸，按新模式重建画面
-        if (_wallpaperSource != null)
+        // 若已有壁纸且窗口已就绪，按新模式重建画面
+        if (_wallpaperSource != null && IsLoaded)
         {
             RebuildBaseImage();
         }
@@ -223,9 +248,21 @@ internal sealed class WallpaperLayerWindow : Window
         if (_wallpaperSource == null) return;
         try
         {
-            var dpi = VisualTreeHelper.GetDpi(this);
-            int pxW = (int)Math.Round(SystemParameters.VirtualScreenWidth * dpi.DpiScaleX);
-            int pxH = (int)Math.Round(SystemParameters.VirtualScreenHeight * dpi.DpiScaleY);
+            // 优先用窗口客户区实际像素尺寸（已挂载铺满，最准确）；失败则回退虚拟屏×DPI
+            int pxW, pxH;
+            IntPtr hwnd = new WindowInteropHelper(this).Handle;
+            if (hwnd != IntPtr.Zero && NativeMethods.GetClientRect(hwnd, out var client)
+                && client.Right > 0 && client.Bottom > 0)
+            {
+                pxW = client.Right;
+                pxH = client.Bottom;
+            }
+            else
+            {
+                (double sx, double sy) = SafeDpiScale();
+                pxW = (int)Math.Round(SystemParameters.VirtualScreenWidth * sx);
+                pxH = (int)Math.Round(SystemParameters.VirtualScreenHeight * sy);
+            }
             pxW = Math.Max(1, pxW);
             pxH = Math.Max(1, pxH);
 
@@ -236,11 +273,25 @@ internal sealed class WallpaperLayerWindow : Window
             _renderer.CopyBaseToOutput();
             _view.Source = _renderer.Output;
 
-            _logger.Info($"壁纸画面已生成: {pxW}x{pxH}, 模式={(int)_mode}");
+            _logger.Info($"壁纸画面已生成: {pxW}x{pxH}px, 模式={(int)_mode}, 源图={_wallpaperSource.PixelWidth}x{_wallpaperSource.PixelHeight}");
         }
         catch (Exception ex)
         {
             _logger.Error("生成壁纸画面失败: " + ex.Message, ex);
+        }
+    }
+
+    /// <summary>安全获取 DPI 缩放（窗口未完全就绪时可能抛异常，兜底 1.0）。</summary>
+    private (double, double) SafeDpiScale()
+    {
+        try
+        {
+            var dpi = VisualTreeHelper.GetDpi(this);
+            return (dpi.DpiScaleX, dpi.DpiScaleY);
+        }
+        catch
+        {
+            return (1.0, 1.0);
         }
     }
 
