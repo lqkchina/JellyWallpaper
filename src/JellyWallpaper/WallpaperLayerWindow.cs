@@ -2,12 +2,9 @@ using System;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
-using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Interop;
-using System.Windows.Shapes;
 using JellyWallpaper.Core;
-using JellyWallpaper.Effects;
 
 namespace JellyWallpaper;
 
@@ -15,37 +12,44 @@ namespace JellyWallpaper;
 /// 壁纸渲染层窗口。
 ///
 /// 核心职责：
-///   1. 作为桌面"壁纸 WorkerW"的子窗口，透明、置顶在图标层之下 —— 只渲染壁纸+果冻形变，
+///   1. 作为桌面"壁纸 WorkerW"的子窗口，覆盖原生壁纸、位于图标层之下 —— 只渲染壁纸+果冻形变，
 ///      绝不遮挡/拦截桌面图标（图标选中、拖拽、新建、删除均不受影响）。
-///   2. 应用 JellyEffect 像素着色器到壁纸图层，实现按压向内凹陷 + 回弹。
-///   3. 负责壁纸按显示模式布局、以及丝滑淡入淡出的轮换过渡。
+///   2. 用 CPU 果冻形变渲染器（CpuJellyRenderer）实现"按压向内凹陷 + 回弹"。
+///      不依赖 GPU / ShaderEffect，兼容虚拟机、远程桌面等无硬件加速环境（避免壁纸层全黑）。
+///   3. 负责壁纸按显示模式布局（填充/适应/拉伸/平铺/跨区/居中）。
 /// </summary>
 internal sealed class WallpaperLayerWindow : Window
 {
     private readonly Logger _logger;
-    private readonly JellyEffect _effect = new();
+    private readonly CpuJellyRenderer _renderer = new();
     private readonly JellyAnimator _animator = new();
 
     private readonly Grid _grid;
-    private UIElement? _current;
+    private readonly Image _view;
     private bool _renderingAttached;
     private Point _pressNormalized;
 
     private WallpaperDisplayMode _mode = WallpaperDisplayMode.Fill;
+    private Color _fillColor = Colors.Black;
+    private BitmapSource? _wallpaperSource; // 系统壁纸源（显示模式布局前）
+
+    // 果冻形变参数
+    private double _strength = 1.0;
+    private double _falloff = 0.02;
+    private double _shade = 0.35;
 
     public WallpaperLayerWindow(Logger logger, IntPtr parentWorkerW, int renderCap)
     {
         _logger = logger;
-        _ = renderCap; // 渲染分辨率由 WallpaperManager 负责，此处预留扩展
+        _ = renderCap; // 渲染分辨率由 WallpaperManager 负责源图解码上限
 
         Title = "JellyWallpaper";
         WindowStyle = WindowStyle.None;
         // 关键：不使用 AllowsTransparency（透明窗口）。
         // WPF 的 AllowsTransparency 使用 WS_EX_LAYERED，而 layered 窗口被 SetParent
         // 变成桌面子窗口后，在 Win10 上常出现"内容不渲染/显示空白"，导致壁纸层看不到。
-        // 我们的渲染层要完全盖住原生壁纸，本来就不需要真透明——
-        // 适应/居中模式留出的空白区由背景填充色填补。改不透明窗口可保证子窗口正常渲染。
-        Background = new SolidColorBrush(Colors.Black); // 兜底，实际由 _grid 背景覆盖
+        // 渲染层要完全盖住原生壁纸，本来就不需要真透明——空白区由背景填充色填补。
+        Background = new SolidColorBrush(Colors.Black);
         ShowInTaskbar = false;
         ShowActivated = false;
         ResizeMode = ResizeMode.NoResize;
@@ -56,7 +60,12 @@ internal sealed class WallpaperLayerWindow : Window
             Background = new SolidColorBrush(Colors.Black),
             IsHitTestVisible = false,
         };
-        _grid.Effect = _effect;
+        _view = new Image
+        {
+            Stretch = Stretch.Fill,
+            IsHitTestVisible = false,
+        };
+        _grid.Children.Add(_view);
         Content = _grid;
 
         Loaded += (_, _) => HostIntoDesktop(parentWorkerW);
@@ -120,9 +129,9 @@ internal sealed class WallpaperLayerWindow : Window
     // ================= 果冻形变 =================
 
     /// <summary>鼠标左键在桌面按下：在按压点触发向内凹陷。</summary>
-    public void OnPress(System.Windows.Point screenPoint)
+    public void OnPress(Point screenPoint)
     {
-        // 屏幕坐标 -> 窗口本地坐标 -> 归一化 (0..1)，供着色器使用
+        // 屏幕坐标 -> 窗口本地坐标 -> 归一化 (0..1)，供形变渲染使用
         Point local = PointFromScreen(screenPoint);
         double nx = ActualWidth > 0 ? local.X / ActualWidth : 0.5;
         double ny = ActualHeight > 0 ? local.Y / ActualHeight : 0.5;
@@ -160,14 +169,17 @@ internal sealed class WallpaperLayerWindow : Window
         double now = (e as RenderingEventArgs)?.RenderingTime.TotalSeconds ?? 0.0;
         bool settled = _animator.Step(now);
 
-        // 更新着色器常量
-        _effect.MouseX = _pressNormalized.X;
-        _effect.MouseY = _pressNormalized.Y;
-        _effect.Depth = _animator.Depth;
+        // CPU 逐像素果冻形变重采样
+        _renderer.Render(_pressNormalized.X, _pressNormalized.Y,
+            _animator.Depth, _strength, _falloff, _shade);
+        if (_renderer.Output != null)
+        {
+            // 重新赋值 Source 强制刷新 WriteableBitmap 的最新像素
+            _view.Source = _renderer.Output;
+        }
 
         if (settled && _animator.Target == 0.0)
         {
-            _effect.Depth = 0.0;
             DetachRenderLoop(); // 空闲即停止渲染循环，节省 CPU
         }
     }
@@ -175,131 +187,110 @@ internal sealed class WallpaperLayerWindow : Window
     /// <summary>推送形变参数（改设置后实时生效）。</summary>
     public void ApplyEffectParams(double strength, double reboundSpeed, double damping)
     {
-        _effect.Strength = strength;
-        _effect.Falloff = 0.02;             // 高斯衰减（集中度），保持观感稳定
-        _effect.Shade = 0.35;               // 按压阴影强度
+        _strength = strength;
+        _falloff = 0.02;   // 高斯衰减（集中度），保持观感稳定
+        _shade = 0.35;     // 按压阴影强度
         _animator.SetParams(reboundSpeed, damping);
     }
 
     // ================= 壁纸显示 =================
 
-    /// <summary>设置壁纸，执行丝滑淡入淡出过渡。</summary>
+    /// <summary>设置壁纸（系统壁纸），并按当前显示模式重建画面。</summary>
     public void ShowWallpaper(BitmapSource bmp)
     {
-        // 确保在 UI 线程
-        if (Dispatcher.CheckAccess())
-        {
-            FadeInWallpaper(bmp);
-        }
-        else
-        {
-            Dispatcher.BeginInvoke(new Action(() => FadeInWallpaper(bmp)));
-        }
-    }
-
-    private void FadeInWallpaper(BitmapSource bmp)
-    {
-        if (bmp == null) return;
-        try
-        {
-            UIElement incoming = BuildWallpaperElement(bmp, _mode);
-
-            if (_current == null)
-            {
-                // 第一张，直接显示
-                _grid.Children.Add(incoming);
-                _current = incoming;
-                return;
-            }
-
-            // 交叉淡化：新图叠在上层淡入，淡入完成后移除旧图
-            UIElement outgoing = _current;
-            incoming.Opacity = 0.0;
-            _grid.Children.Add(incoming);
-
-            var fade = new DoubleAnimation(0.0, 1.0, TimeSpan.FromMilliseconds(350))
-            {
-                EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseInOut }
-            };
-            fade.Completed += (_, _) =>
-            {
-                _grid.Children.Remove(outgoing);
-            };
-            incoming.BeginAnimation(OpacityProperty, fade);
-
-            _current = incoming;
-        }
-        catch (Exception ex)
-        {
-            _logger.Error("切换壁纸失败: " + ex.Message, ex);
-        }
+        _wallpaperSource = bmp;
+        RebuildBaseImage();
     }
 
     /// <summary>设置壁纸显示模式与背景填充色。</summary>
     public void SetDisplayOptions(WallpaperDisplayMode mode, Color fillColor)
     {
         _mode = mode;
+        _fillColor = fillColor;
         _grid.Background = new SolidColorBrush(fillColor);
         Background = new SolidColorBrush(fillColor); // 同步窗口背景（不透明渲染层）
 
-        // 若已有当前壁纸，重建显示元素以应用新模式
-        if (_current != null)
+        // 若已有壁纸，按新模式重建画面
+        if (_wallpaperSource != null)
         {
-            // 取出当前 BitmapSource 重新构建（Image 控件保留 Source）
-            if (_current is Image img && img.Source is BitmapSource bs)
-            {
-                _grid.Children.Remove(_current);
-                UIElement rebuilt = BuildWallpaperElement(bs, mode);
-                _grid.Children.Add(rebuilt);
-                _current = rebuilt;
-            }
-            else if (_current is Rectangle rect && rect.Fill is ImageBrush ib && ib.ImageSource is BitmapSource bs2)
-            {
-                _grid.Children.Remove(_current);
-                UIElement rebuilt = BuildWallpaperElement(bs2, mode);
-                _grid.Children.Add(rebuilt);
-                _current = rebuilt;
-            }
+            RebuildBaseImage();
         }
     }
 
-    private UIElement BuildWallpaperElement(BitmapSource bmp, WallpaperDisplayMode mode)
+    /// <summary>重建基图并铺到渲染层（壁纸按显示模式布局，无果冻的静态画面）。</summary>
+    private void RebuildBaseImage()
     {
-        if (mode == WallpaperDisplayMode.Tile)
+        if (_wallpaperSource == null) return;
+        try
         {
-            // 平铺：ImageBrush 平铺，视口按设备像素绝对尺寸（处理 DPI 缩放）
-            double scaleX = 1.0, scaleY = 1.0;
-            var source = PresentationSource.FromVisual(this);
-            if (source?.CompositionTarget != null)
-            {
-                scaleX = source.CompositionTarget.TransformToDevice.M11;
-                scaleY = source.CompositionTarget.TransformToDevice.M22;
-            }
-            var brush = new ImageBrush(bmp)
-            {
-                TileMode = TileMode.Tile,
-                ViewportUnits = BrushMappingMode.Absolute,
-                Viewport = new Rect(0, 0, bmp.Width / scaleX, bmp.Height / scaleY),
-            };
-            return new Rectangle { Fill = brush };
+            var dpi = VisualTreeHelper.GetDpi(this);
+            int pxW = (int)Math.Round(SystemParameters.VirtualScreenWidth * dpi.DpiScaleX);
+            int pxH = (int)Math.Round(SystemParameters.VirtualScreenHeight * dpi.DpiScaleY);
+            pxW = Math.Max(1, pxW);
+            pxH = Math.Max(1, pxH);
+
+            BitmapSource baseImg = BuildBaseImage(_wallpaperSource, _mode, pxW, pxH, _fillColor);
+
+            _renderer.Resize(pxW, pxH);
+            _renderer.SetBaseImage(baseImg);
+            _renderer.CopyBaseToOutput();
+            _view.Source = _renderer.Output;
+
+            _logger.Info($"壁纸画面已生成: {pxW}x{pxH}, 模式={(int)_mode}");
         }
-
-        Stretch stretch = mode switch
+        catch (Exception ex)
         {
-            WallpaperDisplayMode.Fill => Stretch.UniformToFill,
-            WallpaperDisplayMode.Fit => Stretch.Uniform,
-            WallpaperDisplayMode.Stretch => Stretch.Fill,
-            WallpaperDisplayMode.Span => Stretch.UniformToFill,
-            _ => Stretch.None, // Center
-        };
+            _logger.Error("生成壁纸画面失败: " + ex.Message, ex);
+        }
+    }
 
-        var img = new Image
+    /// <summary>按显示模式把壁纸绘制成一张最终画面（含背景填充色）。</summary>
+    private static BitmapSource BuildBaseImage(BitmapSource wallpaper, WallpaperDisplayMode mode,
+        int w, int h, Color fill)
+    {
+        var rtb = new RenderTargetBitmap(w, h, 96, 96, PixelFormats.Pbgra32);
+        var dv = new DrawingVisual();
+        using (var dc = dv.RenderOpen())
         {
-            Source = bmp,
-            Stretch = stretch,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
-        };
-        return img;
+            var rect = new Rect(0, 0, w, h);
+
+            // 先铺背景填充色（适应/居中模式的空白区）
+            dc.DrawRectangle(new SolidColorBrush(fill), null, rect);
+
+            var brush = new ImageBrush(wallpaper)
+            {
+                Stretch = Stretch.UniformToFill,
+            };
+            switch (mode)
+            {
+                case WallpaperDisplayMode.Fill:
+                    brush.Stretch = Stretch.UniformToFill;
+                    break;
+                case WallpaperDisplayMode.Fit:
+                    brush.Stretch = Stretch.Uniform;
+                    break;
+                case WallpaperDisplayMode.Stretch:
+                    brush.Stretch = Stretch.Fill;
+                    break;
+                case WallpaperDisplayMode.Span:
+                    brush.Stretch = Stretch.UniformToFill;
+                    break;
+                case WallpaperDisplayMode.Center:
+                    brush.Stretch = Stretch.None;
+                    brush.AlignmentX = AlignmentX.Center;
+                    brush.AlignmentY = AlignmentY.Center;
+                    break;
+                case WallpaperDisplayMode.Tile:
+                    brush.Stretch = Stretch.None;
+                    brush.TileMode = TileMode.Tile;
+                    brush.ViewportUnits = BrushMappingMode.Absolute;
+                    brush.Viewport = new Rect(0, 0, wallpaper.Width, wallpaper.Height);
+                    break;
+            }
+            dc.DrawRectangle(brush, null, rect);
+        }
+        rtb.Render(dv);
+        rtb.Freeze();
+        return rtb;
     }
 }

@@ -16,14 +16,16 @@
     <ApplicationIcon>Resources\app.ico</ApplicationIcon>
 
     <!-- 版本号：设置面板会显示；每次更新记得递增 -->
-    <Version>1.1.0</Version>
-    <AssemblyVersion>1.1.0.0</AssemblyVersion>
-    <FileVersion>1.1.0.0</FileVersion>
+    <Version>1.1.1</Version>
+    <AssemblyVersion>1.1.1.0</AssemblyVersion>
+    <FileVersion>1.1.1.0</FileVersion>
 
     <!-- 只保留中/英资源，减小体积 -->
     <SatelliteResourceLanguages>zh-Hans;en</SatelliteResourceLanguages>
     <!-- 我们有意用 app.manifest 声明系统 DPI 感知以对齐桌面 Shell，忽略 WinForms 的相关提示 -->
     <NoWarn>$(NoWarn);WFAC010</NoWarn>
+    <!-- CPU 果冻形变渲染器使用 unsafe 指针逐像素重采样 -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>

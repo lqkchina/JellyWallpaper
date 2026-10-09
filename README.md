@@ -13,7 +13,7 @@ Windows 10 桌面壁纸增强工具：**点击桌面时，壁纸会像果冻一�
 
 | 特性 | 说明 |
 |---|---|
-| 果冻形变 | 鼠标左键在桌面按下 → 按压点向内凹陷（高斯型平滑衰减，**无圆环波纹**）；松开 → 阻尼弹簧平滑回弹（带轻微过冲，Q 弹手感） |
+| 果冻形变 | 鼠标左键在桌面按下 → 按压点向内凹陷（高斯型平滑衰减，**无圆环波纹**）；松开 → 阻尼弹簧平滑回弹（带轻微过冲，Q 弹手感）。**纯 CPU 渲染，不依赖 GPU**，虚拟机/远程桌面也正常 |
 | 不干扰图标 | 渲染层挂在**桌面壁纸层（WorkerW）之下**，透明、不参与命中测试；图标选中/拖拽/新建/删除、右键菜单全部照常 |
 | 系统壁纸 | 直接读取 **Windows 系统当前壁纸** 作为果冻作用纹理（无需设置文件夹，Windows 换壁纸后重启应用即跟随） |
 | 显示模式 | 填充 / 适应 / 拉伸 / 平铺 / 跨区（多显示器扩展）/ 居中，兼容 Windows 原生壁纸设置习惯 |
@@ -131,13 +131,14 @@ JellyWallpaper/
    ├─ App.xaml / App.xaml.cs       # 入口：单实例 + 全局异常捕获
    ├─ AppController.cs             # 编排：渲染层/壁纸/钩子/托盘/设置
    ├─ WallpaperLayerWindow.cs      # 渲染层（桌面图标层之下 + 果冻动画）
-   ├─ Effects/JellyEffect.cs       # 像素着色器封装（ShaderEffect）
-   ├─ Shaders/Jelly.fx             # HLSL 果冻形变着色器
+   ├─ Effects/JellyEffect.cs       # (v1.1.1 起弃用，未使用；原 GPU 着色器封装)
+   ├─ Shaders/Jelly.fx             # (v1.1.1 起弃用，未使用；原 HLSL 着色器)
    ├─ Core/
    │  ├─ NativeMethods.cs          # Win32 P/Invoke
    │  ├─ DesktopLayerLocator.cs    # 定位"壁纸 WorkerW"（图标层之下）
    │  ├─ MouseHook.cs              # 全局低级鼠标钩子（只观察、不拦截）
    │  ├─ WallpaperManager.cs       # 系统壁纸读取/解码（v1.1.0 起不再轮换）
+   │  ├─ CpuJellyRenderer.cs       # CPU 果冻形变渲染器（不依赖 GPU）
    │  ├─ JellyAnimator.cs          # 阻尼弹簧回弹动画器
    │  ├─ HotkeyManager.cs          # (v1.1.0 起弃用，未使用)
    │  ├─ AppSettings.cs / SettingsStore.cs  # 设置模型与持久化
@@ -162,7 +163,8 @@ JellyWallpaper/
 用 `WH_MOUSE_LL` 全局低级钩子**被动观察**左键按下/松开，回调里始终 `CallNextHookEx` 放行，绝不修改或吞掉任何鼠标消息。再用 `WindowFromPoint` 判断点击是否落在桌面区域（Progman/WorkerW/SHELLDLL_DefView/SysListView32），只在桌面点击时触发形变。
 
 **3. 果冻形变怎么做？**
-`Jelly.fx`（PS 3.0 像素着色器）对壁纸纹理按按压点做**高斯型径向位移**：越靠近按压点采样偏移越大，向外平滑衰减（高斯分布无振荡 → 绝无"圆环波纹"），形成向内凹陷；配合轻微按压阴影增强立体感。形变深度由**阻尼弹簧动画器**驱动（`JellyAnimator`），按下 0→1、松开 1→0 且欠阻尼带过冲，即"Q 弹回弹"。
+用**纯 CPU 渲染**（`CpuJellyRenderer`）：把壁纸按显示模式绘制成一张基图，再对输出每个像素计算到按压点的归一化距离 → **高斯型衰减**（无振荡 → 绝无"圆环波纹"）→ 向按压点方向偏移采样 → 双线性插值，形成向内凹陷；配合按压阴影增强立体感。形变深度由**阻尼弹簧动画器**驱动（`JellyAnimator`），按下 0→1、松开 1→0 且欠阻尼带过冲，即"Q 弹回弹"。
+> 为什么不用 GPU 像素着色器（ShaderEffect）？因为 WPF 的 ShaderEffect 依赖硬件 GPU 加速，在虚拟机、远程桌面等无 GPU 环境会把整个壁纸层渲染成**全黑**。改用 CPU 逐像素重采样后任何环境都能工作，且**空闲时不重算、零 CPU 占用**，只在按压/回弹的短短几百毫秒内重绘。
 
 **4. 系统壁纸从哪来？**
 启动时按顺序查找系统壁纸文件：① `%AppData%\Microsoft\Windows\Themes\TranscodedWallpaper`（Windows 实际显示的壁纸，含多显示器拼接，最可靠）→ ② 注册表 `Control Panel\Desktop\WallPaper`。解码后作为果冻纹理显示在渲染层。若桌面是纯色/渐变（无图片文件），则渲染层仅显示背景填充色，此时无可见形变纹理。
@@ -186,6 +188,7 @@ JellyWallpaper/
 
 ## 🏷️ 版本
 
+- v1.1.1：**修复壁纸层全黑** —— 果冻形变从 GPU 像素着色器（ShaderEffect）改为**纯 CPU 渲染**（WriteableBitmap 逐像素高斯凹陷）。原 ShaderEffect 在无 GPU 硬件加速的环境（虚拟机/远程桌面/部分驱动）会把整个壁纸层渲染成黑色，现已彻底解决，任何环境都能显示壁纸并正常果冻。
 - v1.1.0：**去掉换壁纸功能**（文件夹轮换 / 手动切换 / 全局快捷键）——果冻改为作用在 **Windows 系统当前壁纸**上，启动即读一次，无需配置。
 - v1.0.2：修复桌面壁纸层不显示 —— 渲染层改为不透明窗口（WPF 透明窗口挂到桌面子窗口在 Win10 上会渲染空白），并增强挂载日志。
 - v1.0.1：修复 GitHub Actions 打包失败 —— 着色器编译输出目录不存在导致 CS1566；编译前自动创建目录。
