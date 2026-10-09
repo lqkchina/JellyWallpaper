@@ -22,6 +22,9 @@ internal sealed class AppController : IDisposable
     private TrayController? _tray;
     private SettingsWindow? _settingsWindow;
 
+    private System.Windows.Threading.DispatcherTimer? _wallpaperWatch; // 壁纸变化监测
+    private string? _wallpaperSig;                                       // 当前壁纸签名
+
     private bool _disposed;
 
     public AppController()
@@ -72,15 +75,64 @@ internal sealed class AppController : IDisposable
         _tray.RestartApp += Restart;
         _tray.ExitApp += Exit;
 
+        // 6. 监听系统壁纸变化：用户更换系统壁纸后自动重新加载，果冻跟随新壁纸
+        StartWallpaperWatch();
+
         _logger.Info("启动完成，已最小化到系统托盘后台运行。");
     }
 
-    /// <summary>记录未处理异常到日志（由全局异常捕获调用）。</summary>
+    /// <summary>
+    /// 每 3 秒检测一次系统壁纸文件是否变化，变化则重新加载并应用到渲染层。
+    /// 这样用户更换 Windows 壁纸后，果冻纹理自动跟随新壁纸。
+    /// </summary>
+    private void StartWallpaperWatch()
+    {
+        _wallpaperSig = _wallpaper?.GetSignature();
+        _wallpaperWatch = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(3)
+        };
+        _wallpaperWatch.Tick += (_, _) =>
+        {
+            try
+            {
+                var sig = _wallpaper?.GetSignature();
+                if (sig == null || sig == _wallpaperSig) return;
+                _wallpaperSig = sig;
+                _logger.Info("检测到系统壁纸已更换，正在重新加载…");
+                var bmp = _wallpaper?.LoadSystemWallpaper();
+                if (bmp != null) _layer?.ShowWallpaper(bmp);
+            }
+            catch (Exception ex)
+            {
+                _logger.Error("壁纸变化重载失败: " + ex.Message, ex);
+            }
+        };
+        _wallpaperWatch.Start();
+    }
+
+    /// <summary>记录未处理异常到日志（由全局异常捕获调用）。可能从后台线程进入，需线程安全。</summary>
     public void LogCrash(string context, Exception? ex)
     {
-        if (ex != null) _logger.Error($"[异常] {context}", ex);
-        else _logger.Error($"[异常] {context}（异常对象为空）");
-        _tray?.ShowBalloon("JellyWallpaper 发生异常", "详情已写入日志文件。");
+        try
+        {
+            if (ex != null) _logger.Error($"[异常] {context}", ex);
+            else _logger.Error($"[异常] {context}（异常对象为空）");
+
+            // NotifyIcon 只能在 UI 线程操作；后台线程进来需调度到 UI 线程
+            if (_tray != null)
+            {
+                var d = Application.Current?.Dispatcher;
+                if (d != null && !d.CheckAccess())
+                    d.BeginInvoke(() => _tray.ShowBalloon("JellyWallpaper 发生异常", "详情已写入日志文件。"));
+                else
+                    _tray.ShowBalloon("JellyWallpaper 发生异常", "详情已写入日志文件。");
+            }
+        }
+        catch
+        {
+            // 崩溃记录本身失败时静默，避免二次异常
+        }
     }
 
     private void OpenSettingsWindow()
@@ -158,6 +210,7 @@ internal sealed class AppController : IDisposable
         try { _settingsWindow?.Close(); } catch { }
         try { _tray?.Dispose(); } catch { }
         try { _mouseHook?.Dispose(); } catch { }
+        try { _wallpaperWatch?.Stop(); _wallpaperWatch = null; } catch { }
         try { _wallpaper = null; } catch { }
         try { _layer?.Close(); } catch { }
         try { _store.Save(_settings); } catch { }

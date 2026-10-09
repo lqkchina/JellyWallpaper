@@ -4,6 +4,7 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Interop;
+using System.Windows.Threading;
 using JellyWallpaper.Core;
 
 namespace JellyWallpaper;
@@ -31,7 +32,7 @@ internal sealed class WallpaperLayerWindow : Window
 
     private readonly Grid _grid;
     private readonly Image _view;
-    private bool _renderingAttached;
+    private DispatcherTimer? _animTimer; // 动画帧定时器（驱动果冻形变）
     private bool _reportedNoFrame;   // 已提示"无画面"（避免刷屏）
     private Point _pressNormalized;
 
@@ -173,35 +174,42 @@ internal sealed class WallpaperLayerWindow : Window
 
     private void AttachRenderLoop()
     {
-        if (_renderingAttached) return;
-        _renderingAttached = true;
-        CompositionTarget.Rendering += OnRenderFrame;
+        if (_animTimer != null) return;
+        // 用 DispatcherTimer 驱动动画：只依赖 Dispatcher 消息循环，稳定触发。
+        // 不能依赖 CompositionTarget.Rendering —— 程序最小化到托盘、画面静止时，
+        // WPF 渲染线程会暂停，该事件不触发，导致果冻动画永远不跑。
+        _animTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
+        _animTimer.Tick += OnAnimTick;
+        _animTimer.Start();
     }
 
     private void DetachRenderLoop()
     {
-        if (!_renderingAttached) return;
-        _renderingAttached = false;
-        CompositionTarget.Rendering -= OnRenderFrame;
+        if (_animTimer == null) return;
+        _animTimer.Stop();
+        _animTimer.Tick -= OnAnimTick;
+        _animTimer = null;
     }
 
-    private void OnRenderFrame(object? sender, EventArgs e)
+    private void OnAnimTick(object? sender, EventArgs e)
     {
-        double now = (e as RenderingEventArgs)?.RenderingTime.TotalSeconds ?? 0.0;
+        double now = Environment.TickCount64 / 1000.0;
         bool settled = _animator.Step(now);
 
-        // CPU 逐像素果冻形变重采样
+        // CPU 逐像素果冻形变重采样；WriteableBitmap 更新后引用它的 Image 会自动重绘，
+        // 这里再 InvalidateVisual 兜底，确保每一帧都强制刷新到屏幕上。
         _renderer.Render(_pressNormalized.X, _pressNormalized.Y,
             _animator.Depth, _strength, _falloff, _shade);
         if (_renderer.Output != null)
         {
-            // 重新赋值 Source 强制刷新 WriteableBitmap 的最新像素
-            _view.Source = _renderer.Output;
+            _view.InvalidateVisual();
         }
 
-        if (settled && _animator.Target == 0.0)
+        if (settled)
         {
-            DetachRenderLoop(); // 空闲即停止渲染循环，节省 CPU
+            // 画面已稳定（无论按住凹陷还是回弹到位）即停止动画，节省 CPU；
+            // 松开/再次按下时 OnRelease/OnPress 会重新挂接。
+            DetachRenderLoop();
         }
     }
 
@@ -209,7 +217,9 @@ internal sealed class WallpaperLayerWindow : Window
     public void ApplyEffectParams(double strength, double reboundSpeed, double damping)
     {
         _strength = strength;
-        _falloff = 0.02;   // 高斯衰减（集中度），保持观感稳定
+        // "按压衰减系数"(damping) 同时作为形变影响半径基数（像素）：
+        // 影响半径 = damping * 10，默认 12 → 120px，保证肉眼可见的凹陷范围。
+        _falloff = damping;
         _shade = 0.35;     // 按压阴影强度
         _animator.SetParams(reboundSpeed, damping);
     }

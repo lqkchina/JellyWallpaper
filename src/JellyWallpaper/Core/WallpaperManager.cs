@@ -81,6 +81,25 @@ internal sealed class WallpaperManager
         return null;
     }
 
+    /// <summary>
+    /// 返回系统壁纸的"签名"（路径+文件修改时间）。用于检测用户更换系统壁纸后自动重载。
+    /// 壁纸不可读时返回 null。
+    /// </summary>
+    public string? GetSignature()
+    {
+        try
+        {
+            string? path = FindWallpaperPath();
+            if (string.IsNullOrEmpty(path) || !File.Exists(path)) return null;
+            var t = File.GetLastWriteTimeUtc(path);
+            return $"{path}|{t.Ticks}";
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     /// <summary>按形变渲染分辨率上限解码图片。cap&gt;0 时缩放到长边不超过 cap。</summary>
     private BitmapSource? LoadBitmap(string path, int cap)
     {

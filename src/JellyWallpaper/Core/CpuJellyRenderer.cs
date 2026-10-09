@@ -22,6 +22,7 @@ internal sealed class CpuJellyRenderer : IDisposable
     private byte[]? _src;   // 壁纸基图 BGRA32（尺寸=输出尺寸）
     private int _srcW, _srcH;
     private WriteableBitmap? _wb;
+    private byte[] _rectBuf = Array.Empty<byte>(); // 复用缓冲，避免每帧分配引发 GC
 
     public int Width { get; private set; }
     public int Height { get; private set; }
@@ -60,8 +61,15 @@ internal sealed class CpuJellyRenderer : IDisposable
     }
 
     /// <summary>
-    /// 对按压点周围的局部区域做果冻形变重采样（高斯径向凹陷 + 双线性插值 + 按压阴影）。
+    /// 对按压点周围的局部区域做果冻形变重采样（径向向内凹陷 + 双线性插值 + 按压阴影）。
     /// 只更新受影响的小矩形，性能高、不卡鼠标。
+    ///
+    /// 参数说明：
+    ///   mouseX/mouseY：按压点归一化坐标 (0..1)
+    ///   depth：动画深度 (0=复原, 1=完全按下)
+    ///   strength：形变强度（位移幅度基数）
+    ///   falloff：影响半径基数（像素）—— 实际影响半径 = falloff * 10
+    ///   shade：按压阴影强度
     /// </summary>
     public unsafe void Render(double mouseX, double mouseY, double depth,
         double strength, double falloff, double shade)
@@ -70,13 +78,17 @@ internal sealed class CpuJellyRenderer : IDisposable
 
         double fw = _srcW - 1.0, fh = _srcH - 1.0;
         double mouseU = mouseX * fw, mouseV = mouseY * fh;
-        double k = strength * depth;
-        double inv = 1.0 / Math.Max(falloff, 0.0001);
-        double shdMul = 1.0 - shade * Math.Abs(depth); // 阴影随深度变暗（再乘高斯衰减）
 
-        // 影响半径（像素）：高斯衰减到可忽略(<0.001)处的范围，限制重采样区域，上限 500px 防过大
-        double r2max = Math.Log(1.0 / 0.001) / inv; // exp(-r2*inv) < 0.001
-        double rPx = Math.Sqrt(Math.Max(r2max, 4.0)) + 2.0;
+        // 影响半径（像素）：由"按压衰减系数"映射，保证肉眼可见的凹陷范围
+        double sigma = Math.Max(falloff * 10.0, 20.0);
+        sigma = Math.Min(sigma, 400.0);
+        double inv2 = 1.0 / (2.0 * sigma * sigma);
+
+        // 位移幅度（像素）：随形变强度与按压力度线性变化
+        double amp = strength * depth * 40.0;
+
+        // 重采样范围：高斯衰减到可忽略处 + 位移幅度，限制为小矩形；上限 500px 防过大
+        double rPx = sigma * 3.0 + Math.Abs(amp) + 4.0;
         rPx = Math.Min(rPx, 500.0);
 
         // 受影响的目标像素矩形
@@ -87,7 +99,10 @@ internal sealed class CpuJellyRenderer : IDisposable
         if (ox0 > ox1 || oy0 > oy1) return;
 
         int rectW = ox1 - ox0 + 1, rectH = oy1 - oy0 + 1;
-        var rectBuf = new byte[rectW * rectH * 4];
+        // 复用缓冲，避免动画期间每帧分配大数组引发 GC
+        int need = rectW * rectH * 4;
+        if (_rectBuf.Length < need) _rectBuf = new byte[need];
+        byte[] rectBuf = _rectBuf;
 
         int sw = _srcW, sh = _srcH;
         double ox = fw / Math.Max(1, Width - 1);
@@ -106,10 +121,22 @@ internal sealed class CpuJellyRenderer : IDisposable
                     double u = gx * ox;
                     double dx = u - mouseU, dy = v - mouseV;
                     double r2 = dx * dx + dy * dy;
-                    double f = Math.Exp(-r2 * inv);
+                    double f = Math.Exp(-r2 * inv2); // 高斯径向衰减
 
-                    double su = u - dx * (k * f);
-                    double sv = v - dy * (k * f);
+                    // 径向向外凹陷：像素沿 (dx,dy) 方向被推开，幅度 = amp * f（中心处位移为 0，
+                    // 四周随高斯衰减，形成"按压向内凹陷 + 周边被挤开"的果冻效果）
+                    double dis = amp * f;
+                    double su, sv;
+                    double r = Math.Sqrt(r2);
+                    if (r > 1e-6)
+                    {
+                        su = u - (dx / r) * dis;
+                        sv = v - (dy / r) * dis;
+                    }
+                    else
+                    {
+                        su = u; sv = v;
+                    }
 
                     // 双线性采样边界钳制
                     int x0 = (int)su, y0 = (int)sv;
@@ -125,15 +152,16 @@ internal sealed class CpuJellyRenderer : IDisposable
 
                     double b = (p00[0] * fx1 + p01[0] * fx) * fy1 + (p10[0] * fx1 + p11[0] * fx) * fy;
                     double g = (p00[1] * fx1 + p01[1] * fx) * fy1 + (p10[1] * fx1 + p11[1] * fx) * fy;
-                    double r = (p00[2] * fx1 + p01[2] * fx) * fy1 + (p10[2] * fx1 + p11[2] * fx) * fy;
+                    double r_ = (p00[2] * fx1 + p01[2] * fx) * fy1 + (p10[2] * fx1 + p11[2] * fx) * fy;
 
-                    double s = shdMul < 1.0 ? 1.0 - (1.0 - shdMul) * f : 1.0;
+                    // 按压阴影：按下的区域整体变暗，增强"凹陷"立体感
+                    double s = 1.0 - shade * Math.Abs(depth) * f;
                     if (s < 0) s = 0;
 
                     byte* d = rb + (yy * rectW + xx) * 4;
                     d[0] = (byte)(b * s);
                     d[1] = (byte)(g * s);
-                    d[2] = (byte)(r * s);
+                    d[2] = (byte)(r_ * s);
                     d[3] = 255;
                 }
             }

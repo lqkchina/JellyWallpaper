@@ -49,22 +49,31 @@ internal sealed class MouseHook : IDisposable
     {
         if (nCode >= 0)
         {
-            var hook = Marshal.PtrToStructure<NativeMethods.MSLLHOOKSTRUCT>(lParam);
-            switch ((int)wParam)
+            // 关键：低级鼠标钩子回调里绝不能抛异常（会影响整个钩子链 / 系统鼠标事件），
+            // 所有用户代码用 try-catch 包裹，异常只记录，绝不上抛。
+            try
             {
-                case NativeMethods.WM_LBUTTONDOWN:
+                var hook = Marshal.PtrToStructure<NativeMethods.MSLLHOOKSTRUCT>(lParam);
+                switch ((int)wParam)
                 {
-                    var pt = new System.Windows.Point(hook.pt.X, hook.pt.Y);
-                    // 仅当点击落在桌面区域时才触发形变
-                    if (IsOverDesktop(hook.pt))
+                    case NativeMethods.WM_LBUTTONDOWN:
                     {
-                        LeftButtonDownOnDesktop?.Invoke(pt);
+                        var pt = new System.Windows.Point(hook.pt.X, hook.pt.Y);
+                        // 仅当点击落在桌面区域时才触发形变
+                        if (IsOverDesktop(hook.pt))
+                        {
+                            LeftButtonDownOnDesktop?.Invoke(pt);
+                        }
+                        break;
                     }
-                    break;
+                    case NativeMethods.WM_LBUTTONUP:
+                        LeftButtonUp?.Invoke();
+                        break;
                 }
-                case NativeMethods.WM_LBUTTONUP:
-                    LeftButtonUp?.Invoke();
-                    break;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine("MouseHook callback error: " + ex);
             }
         }
 
