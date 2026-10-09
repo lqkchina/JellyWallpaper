@@ -50,6 +50,12 @@ internal static class NativeMethods
     public static extern bool IsWindowVisible(IntPtr hWnd);
 
     [DllImport("user32.dll")]
+    public static extern bool IsWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetParent(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
     public static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
